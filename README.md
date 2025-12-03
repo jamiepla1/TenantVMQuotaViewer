@@ -139,4 +139,5 @@ Modify the script to loop through multiple regions or accept a parameter.
 
 ## License
 
-MIT License
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT License.
