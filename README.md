@@ -1,4 +1,4 @@
-# Azure VM Quota Finder
+# Tenant VM Quota Finder
 
 A PowerShell script to retrieve virtual machine vCPU quota consumption across all subscriptions in an Azure tenant, with an interactive HTML report.
 
