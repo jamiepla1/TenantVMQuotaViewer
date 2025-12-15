@@ -1,13 +1,13 @@
-# PowerShell Script to Get VM Quota Consumption Across All Subscriptions in a Tenant
+# PowerShell Script to Get App Service Plan Quota Consumption Across All Subscriptions in a Tenant
 # Requires: Az PowerShell module
 
 # Import required Azure modules
 try {
     Import-Module Az.Accounts -ErrorAction Stop
-    Import-Module Az.Compute -ErrorAction Stop
+    Import-Module Az.Websites -ErrorAction Stop
 }
 catch {
-    Write-Error "Failed to import required Az modules. Please ensure the Az module is installed: Install-Module -Name Az.Accounts, Az.Compute -Scope CurrentUser"
+    Write-Error "Failed to import required Az modules. Please ensure the Az module is installed: Install-Module -Name Az.Accounts, Az.Websites -Scope CurrentUser"
     exit 1
 }
 
@@ -63,26 +63,41 @@ foreach ($subscription in $subscriptions) {
         continue
     }
     
-    # Get VM quota usage for UK South
+    # Get App Service Plan quota usage for UK South
     try {
-        $vmUsage = Get-AzVMUsage -Location $targetLocation -ErrorAction Stop
+        # Use the correct API path with proper location name normalization (remove spaces, lowercase)
+        $normalizedLocation = $targetLocation.ToLower() -replace '\s', ''
+        $aspUsageData = Invoke-AzRestMethod -Path "/subscriptions/$($subscription.Id)/providers/Microsoft.Web/locations/$normalizedLocation/usages?api-version=2023-01-01" -Method GET
         
-        if ($vmUsage) {
-            foreach ($usage in $vmUsage) {
-                # Filter for vCPU-related quotas only (VM compute SKUs)
-                $resourceName = $usage.Name.LocalizedValue
-                if ($resourceName -match "vCPU|Virtual Machine|Availability Sets|Dedicated|Low-priority") {
-                    $quotaResults += [PSCustomObject]@{
-                        SubscriptionName = $subscription.Name
-                        SubscriptionId   = $subscription.Id
-                        Location         = $targetLocation
-                        ResourceType     = $resourceName
-                        CurrentUsage     = $usage.CurrentValue
-                        Limit            = $usage.Limit
-                        UsagePercentage  = if ($usage.Limit -gt 0) { [math]::Round(($usage.CurrentValue / $usage.Limit) * 100, 2) } else { 0 }
+        if ($aspUsageData.StatusCode -eq 200) {
+            $usages = ($aspUsageData.Content | ConvertFrom-Json).value
+            
+            if ($usages) {
+                foreach ($usage in $usages) {
+                    $resourceName = if ($usage.name.localizedValue) { $usage.name.localizedValue } else { $usage.name.value }
+                    
+                    if ($resourceName) {
+                        $quotaResults += [PSCustomObject]@{
+                            SubscriptionName = $subscription.Name
+                            SubscriptionId   = $subscription.Id
+                            Location         = $targetLocation
+                            ResourceType     = $resourceName
+                            CurrentUsage     = [int]$usage.currentValue
+                            Limit            = [int]$usage.limit
+                            UsagePercentage  = if ($usage.limit -gt 0) { [math]::Round(($usage.currentValue / $usage.limit) * 100, 2) } else { 0 }
+                        }
                     }
                 }
             }
+            else {
+                Write-Host "  No App Service quota data found for $targetLocation" -ForegroundColor Yellow
+            }
+        }
+        elseif ($aspUsageData.StatusCode -eq 400) {
+            Write-Warning "Bad request for subscription $($subscription.Name). This might indicate the subscription doesn't have App Service registered or the location is invalid."
+        }
+        else {
+            Write-Warning "API request failed with status code: $($aspUsageData.StatusCode) for subscription $($subscription.Name)"
         }
     }
     catch {
@@ -94,7 +109,7 @@ foreach ($subscription in $subscriptions) {
 $quotaResults | Format-Table -AutoSize
 
 # Optionally export to CSV
-# $quotaResults | Export-Csv -Path "VMQuotaReport.csv" -NoTypeInformation
+# $quotaResults | Export-Csv -Path "AppServicePlanQuotaReport.csv" -NoTypeInformation
 
 # Show summary of high usage quotas (over 80%)
 Write-Host "`nQuotas with usage over 80%:" -ForegroundColor Yellow
@@ -137,7 +152,7 @@ $htmlContent = @"
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure VM Quota Report - Tenant Wide Summary</title>
+    <title>Azure App Service Plan Quota Report - Tenant Wide Summary</title>
     <style>
         * {
             margin: 0;
@@ -349,7 +364,7 @@ $htmlContent = @"
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔍 Azure VM Quota Report</h1>
+            <h1>🔍 Azure App Service Plan Quota Report</h1>
             <p>Tenant-wide quota consumption summary for UK South region</p>
             <div class="header-info">
                 <div class="header-info-item">
@@ -504,7 +519,7 @@ $htmlContent += @"
         </div>
 
         <div class="footer">
-            <p>Generated by Azure VM Quota Finder | PowerShell Script</p>
+            <p>Generated by Azure App Service Plan Quota Finder | PowerShell Script</p>
         </div>
     </div>
 
@@ -561,7 +576,7 @@ $htmlContent += @"
 "@
 
 # Save HTML report
-$htmlPath = Join-Path -Path (Get-Location) -ChildPath "VMQuotaReport.html"
+$htmlPath = Join-Path -Path (Get-Location) -ChildPath "AppServicePlanQuotaReport.html"
 $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
 
 Write-Host "HTML report generated: $htmlPath" -ForegroundColor Green
