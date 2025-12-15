@@ -1,158 +1,9 @@
-# PowerShell Script to Get App Service Plan Quota Consumption Across All Subscriptions in a Tenant
-# Requires: Az PowerShell module
-
-# Import required Azure modules
-try {
-    Import-Module Az.Accounts -ErrorAction Stop
-    Import-Module Az.Websites -ErrorAction Stop
-}
-catch {
-    Write-Error "Failed to import required Az modules. Please ensure the Az module is installed: Install-Module -Name Az.Accounts, Az.Websites -Scope CurrentUser"
-    exit 1
-}
-
-# Configuration - specify the location to check
-$targetLocation = "uksouth"
-
-# Check for existing Azure session, if not connected, use device code authentication
-try {
-    $context = Get-AzContext -ErrorAction SilentlyContinue
-
-    if (-not $context) {
-        Write-Host "No active Azure session found. Initiating device code authentication..." -ForegroundColor Yellow
-        Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop
-    }
-    else {
-        Write-Host "Already connected to Azure as: $($context.Account.Id)" -ForegroundColor Green
-        Write-Host "Tenant: $($context.Tenant.Id)" -ForegroundColor Green
-    }
-}
-catch {
-    Write-Error "Failed to authenticate to Azure: $_"
-    exit 1
-}
-
-# Get all subscriptions in the tenant
-try {
-    $subscriptions = Get-AzSubscription -ErrorAction Stop
-    
-    if (-not $subscriptions) {
-        Write-Warning "No subscriptions found in the tenant."
-        exit 0
-    }
-    
-    Write-Host "Found $($subscriptions.Count) subscription(s) to process." -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to retrieve subscriptions: $_"
-    exit 1
-}
-
-# Create an array to store results
-$quotaResults = @()
-
-foreach ($subscription in $subscriptions) {
-    Write-Host "Processing subscription: $($subscription.Name) ($($subscription.Id))" -ForegroundColor Cyan
-    
-    # Set the current subscription context
-    try {
-        Set-AzContext -SubscriptionId $subscription.Id -ErrorAction Stop | Out-Null
-    }
-    catch {
-        Write-Warning "Could not set context for subscription $($subscription.Name): $_"
-        continue
-    }
-    
-    # Get App Service Plan quota usage for UK South
-    try {
-        # Use the correct API path with proper location name normalization (remove spaces, lowercase)
-        $normalizedLocation = $targetLocation.ToLower() -replace '\s', ''
-        $aspUsageData = Invoke-AzRestMethod -Path "/subscriptions/$($subscription.Id)/providers/Microsoft.Web/locations/$normalizedLocation/usages?api-version=2023-01-01" -Method GET
-        
-        if ($aspUsageData.StatusCode -eq 200) {
-            $usages = ($aspUsageData.Content | ConvertFrom-Json).value
-            
-            if ($usages) {
-                foreach ($usage in $usages) {
-                    $resourceName = if ($usage.name.localizedValue) { $usage.name.localizedValue } else { $usage.name.value }
-                    
-                    if ($resourceName) {
-                        $quotaResults += [PSCustomObject]@{
-                            SubscriptionName = $subscription.Name
-                            SubscriptionId   = $subscription.Id
-                            Location         = $targetLocation
-                            ResourceType     = $resourceName
-                            CurrentUsage     = [int]$usage.currentValue
-                            Limit            = [int]$usage.limit
-                            UsagePercentage  = if ($usage.limit -gt 0) { [math]::Round(($usage.currentValue / $usage.limit) * 100, 2) } else { 0 }
-                        }
-                    }
-                }
-            }
-            else {
-                Write-Host "  No App Service quota data found for $targetLocation" -ForegroundColor Yellow
-            }
-        }
-        elseif ($aspUsageData.StatusCode -eq 400) {
-            Write-Warning "Bad request for subscription $($subscription.Name). This might indicate the subscription doesn't have App Service registered or the location is invalid."
-        }
-        else {
-            Write-Warning "API request failed with status code: $($aspUsageData.StatusCode) for subscription $($subscription.Name)"
-        }
-    }
-    catch {
-        Write-Warning "Could not retrieve quota for $targetLocation in subscription $($subscription.Name): $_"
-    }
-}
-
-# Display results
-$quotaResults | Format-Table -AutoSize
-
-# Optionally export to CSV
-# $quotaResults | Export-Csv -Path "AppServicePlanQuotaReport.csv" -NoTypeInformation
-
-# Show summary of high usage quotas (over 80%)
-Write-Host "`nQuotas with usage over 80%:" -ForegroundColor Yellow
-$quotaResults | Where-Object { $_.UsagePercentage -ge 80 } | Format-Table -AutoSize
-
-# Generate HTML Report with tenant-wide SKU summary
-Write-Host "`nGenerating HTML report..." -ForegroundColor Cyan
-
-# Group by ResourceType and calculate tenant-wide totals, including subscription details
-$skuSummary = $quotaResults | Group-Object -Property ResourceType | ForEach-Object {
-    $totalUsage = ($_.Group | Measure-Object -Property CurrentUsage -Sum).Sum
-    $totalLimit = ($_.Group | Measure-Object -Property Limit -Sum).Sum
-    $usagePercentage = if ($totalLimit -gt 0) { [math]::Round(($totalUsage / $totalLimit) * 100, 2) } else { 0 }
-    
-    # Get subscription details - those with usage > 0 OR limit > 0
-    $subscriptionDetails = $_.Group | Where-Object { $_.CurrentUsage -gt 0 -or $_.Limit -gt 0 } | 
-        Sort-Object -Property CurrentUsage -Descending |
-        Select-Object SubscriptionName, SubscriptionId, CurrentUsage, Limit, UsagePercentage
-    
-    [PSCustomObject]@{
-        ResourceType        = $_.Name
-        TotalUsage          = $totalUsage
-        TotalLimit          = $totalLimit
-        UsagePercentage     = $usagePercentage
-        SubscriptionCount   = $_.Count
-        SubscriptionDetails = $subscriptionDetails
-    }
-} | Sort-Object -Property UsagePercentage -Descending
-
-# Get tenant info
-$tenantId = (Get-AzContext).Tenant.Id
-$tenantInfo = Get-AzTenant -TenantId $tenantId -ErrorAction SilentlyContinue
-$tenantName = if ($tenantInfo.Name) { $tenantInfo.Name } else { "Unknown" }
-$reportDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-# Build HTML content
-$htmlContent = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure App Service Plan Quota Report - Tenant Wide Summary</title>
+    <title>Azure Storage Quota Report - Tenant Wide Summary</title>
     <style>
         * {
             margin: 0;
@@ -364,47 +215,47 @@ $htmlContent = @"
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔍 Azure App Service Plan Quota Report</h1>
+            <h1>🔍 Azure Storage Quota Report</h1>
             <p>Tenant-wide quota consumption summary for UK South region</p>
             <div class="header-info">
                 <div class="header-info-item">
                     <label>Tenant Name</label>
-                    <span>$tenantName</span>
+                    <span>Contoso</span>
                 </div>
                 <div class="header-info-item">
                     <label>Tenant ID</label>
-                    <span>$tenantId</span>
+                    <span>181c6a54-1d93-4de4-ab6e-d9b772b11577</span>
                 </div>
                 <div class="header-info-item">
                     <label>Location</label>
-                    <span>$targetLocation</span>
+                    <span>uksouth</span>
                 </div>
                 <div class="header-info-item">
                     <label>Report Generated</label>
-                    <span>$reportDate</span>
+                    <span>2025-12-15 16:00:09</span>
                 </div>
                 <div class="header-info-item">
                     <label>Subscriptions Scanned</label>
-                    <span>$($subscriptions.Count)</span>
+                    <span>5</span>
                 </div>
             </div>
         </div>
 
         <div class="summary-cards">
             <div class="card">
-                <div class="card-value">$($skuSummary.Count)</div>
+                <div class="card-value">1</div>
                 <div class="card-label">Total SKU Types</div>
             </div>
             <div class="card">
-                <div class="card-value">$(($skuSummary | Where-Object { $_.UsagePercentage -ge 80 }).Count)</div>
+                <div class="card-value">0</div>
                 <div class="card-label">SKUs at 80%+ Usage</div>
             </div>
             <div class="card">
-                <div class="card-value">$(($skuSummary | Where-Object { $_.UsagePercentage -ge 50 -and $_.UsagePercentage -lt 80 }).Count)</div>
+                <div class="card-value">0</div>
                 <div class="card-label">SKUs at 50-80% Usage</div>
             </div>
             <div class="card">
-                <div class="card-value">$(($skuSummary | Where-Object { $_.TotalUsage -gt 0 }).Count)</div>
+                <div class="card-value">1</div>
                 <div class="card-label">SKUs with Active Usage</div>
             </div>
         </div>
@@ -425,41 +276,19 @@ $htmlContent = @"
                         <th>Subscriptions</th>
                     </tr>
                 </thead>
-                <tbody>
-"@
-
-foreach ($sku in $skuSummary) {
-    $progressClass = if ($sku.UsagePercentage -ge 80) { "progress-critical" }
-                     elseif ($sku.UsagePercentage -ge 50) { "progress-high" }
-                     elseif ($sku.UsagePercentage -ge 25) { "progress-medium" }
-                     else { "progress-low" }
-    
-    $usageClass = if ($sku.UsagePercentage -ge 80) { "usage-critical" }
-                  elseif ($sku.UsagePercentage -ge 50) { "usage-high" }
-                  elseif ($sku.UsagePercentage -ge 25) { "usage-medium" }
-                  else { "usage-low" }
-    
-    $progressWidth = [math]::Min($sku.UsagePercentage, 100)
-    
-    # Check if there are subscription details to show
-    $hasDetails = $sku.SubscriptionDetails -and $sku.SubscriptionDetails.Count -gt 0
-    $rowId = [System.Guid]::NewGuid().ToString("N").Substring(0, 8)
-    
-    if ($hasDetails) {
-        $htmlContent += @"
-                    <tr class="expandable-row" onclick="toggleDetails('$rowId')">
-                        <td><span class="expand-icon" id="icon-$rowId">▶</span><strong>$($sku.ResourceType)</strong></td>
-                        <td>$($sku.TotalUsage.ToString("N0"))</td>
-                        <td>$($sku.TotalLimit.ToString("N0"))</td>
-                        <td><span class="usage-text $usageClass">$($sku.UsagePercentage)%</span></td>
+                <tbody>                    <tr class="expandable-row" onclick="toggleDetails('27c201ea')">
+                        <td><span class="expand-icon" id="icon-27c201ea">▶</span><strong>Storage Accounts</strong></td>
+                        <td>4</td>
+                        <td>1,250</td>
+                        <td><span class="usage-text usage-low">0.32%</span></td>
                         <td>
                             <div class="progress-bar">
-                                <div class="progress-fill $progressClass" style="width: $progressWidth%"></div>
+                                <div class="progress-fill progress-low" style="width: 0.32%"></div>
                             </div>
                         </td>
-                        <td>$($sku.SubscriptionCount)</td>
+                        <td>5</td>
                     </tr>
-                    <tr class="subscription-details" id="details-$rowId">
+                    <tr class="subscription-details" id="details-27c201ea">
                         <td colspan="6">
                             <table class="sub-table">
                                 <thead>
@@ -471,55 +300,45 @@ foreach ($sku in $skuSummary) {
                                         <th>Usage %</th>
                                     </tr>
                                 </thead>
-                                <tbody>
-"@
-        foreach ($sub in $sku.SubscriptionDetails) {
-            $subUsageClass = if ($sub.UsagePercentage -ge 80) { "usage-critical" }
-                             elseif ($sub.UsagePercentage -ge 50) { "usage-high" }
-                             elseif ($sub.UsagePercentage -ge 25) { "usage-medium" }
-                             else { "usage-low" }
-            
-            $htmlContent += @"
-                                    <tr>
-                                        <td>$($sub.SubscriptionName)</td>
-                                        <td style="font-family: monospace; font-size: 11px;">$($sub.SubscriptionId)</td>
-                                        <td>$($sub.CurrentUsage.ToString("N0"))</td>
-                                        <td>$($sub.Limit.ToString("N0"))</td>
-                                        <td><span class="usage-text $subUsageClass">$($sub.UsagePercentage)%</span></td>
-                                    </tr>
-"@
-        }
-        $htmlContent += @"
-                                </tbody>
+                                <tbody>                                    <tr>
+                                        <td>Bootstrap</td>
+                                        <td style="font-family: monospace; font-size: 11px;">200b218a-c970-4fe4-81bd-f95eee4920b9</td>
+                                        <td>3</td>
+                                        <td>250</td>
+                                        <td><span class="usage-text usage-low">1.2%</span></td>
+                                    </tr>                                    <tr>
+                                        <td>Sandbox</td>
+                                        <td style="font-family: monospace; font-size: 11px;">44e68492-778f-4f5f-b45b-f562d157a25a</td>
+                                        <td>1</td>
+                                        <td>250</td>
+                                        <td><span class="usage-text usage-low">0.4%</span></td>
+                                    </tr>                                    <tr>
+                                        <td>Connectivity</td>
+                                        <td style="font-family: monospace; font-size: 11px;">cd0e6de6-0971-46a6-9dd9-3534b6befd4a</td>
+                                        <td>0</td>
+                                        <td>250</td>
+                                        <td><span class="usage-text usage-low">0%</span></td>
+                                    </tr>                                    <tr>
+                                        <td>Identity</td>
+                                        <td style="font-family: monospace; font-size: 11px;">c6c9552c-6909-4ff7-bfc0-80c0a0c1a7c3</td>
+                                        <td>0</td>
+                                        <td>250</td>
+                                        <td><span class="usage-text usage-low">0%</span></td>
+                                    </tr>                                    <tr>
+                                        <td>Management</td>
+                                        <td style="font-family: monospace; font-size: 11px;">33fde647-ced5-446a-8b5a-e706a9331e99</td>
+                                        <td>0</td>
+                                        <td>250</td>
+                                        <td><span class="usage-text usage-low">0%</span></td>
+                                    </tr>                                </tbody>
                             </table>
                         </td>
-                    </tr>
-"@
-    } else {
-        $htmlContent += @"
-                    <tr>
-                        <td><span class="expand-icon no-expand">-</span><strong>$($sku.ResourceType)</strong></td>
-                        <td>$($sku.TotalUsage.ToString("N0"))</td>
-                        <td>$($sku.TotalLimit.ToString("N0"))</td>
-                        <td><span class="usage-text $usageClass">$($sku.UsagePercentage)%</span></td>
-                        <td>
-                            <div class="progress-bar">
-                                <div class="progress-fill $progressClass" style="width: $progressWidth%"></div>
-                            </div>
-                        </td>
-                        <td>$($sku.SubscriptionCount)</td>
-                    </tr>
-"@
-    }
-}
-
-$htmlContent += @"
-                </tbody>
+                    </tr>                </tbody>
             </table>
         </div>
 
         <div class="footer">
-            <p>Generated by Azure App Service Plan Quota Finder | PowerShell Script</p>
+            <p>Generated by Azure Storage Quota Finder | PowerShell Script</p>
         </div>
     </div>
 
@@ -573,10 +392,3 @@ $htmlContent += @"
     </script>
 </body>
 </html>
-"@
-
-# Save HTML report
-$htmlPath = Join-Path -Path (Get-Location) -ChildPath "AppServicePlanQuotaReport.html"
-$htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
-
-Write-Host "HTML report generated: $htmlPath" -ForegroundColor Green
