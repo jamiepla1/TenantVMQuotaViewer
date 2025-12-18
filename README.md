@@ -10,7 +10,7 @@ This script iterates through every subscription in your Azure tenant and retriev
 
 - ✅ **Automatic Authentication** - Detects existing Azure session or prompts for device code authentication
 - ✅ **Tenant-Wide Scanning** - Iterates through all accessible subscriptions
-- ✅ **vCPU Focused** - Filters to only compute-related quotas (vCPUs, Virtual Machines, Availability Sets, etc.)
+- ✅ **vCPU, App Service and Storage Focused** - Filters to only compute-related quotas (vCPUs, Virtual Machines, Availability Sets, etc.)
 - ✅ **HTML Report** - Generates an interactive HTML report with:
   - Tenant name and ID display
   - Aggregated SKU usage across all subscriptions
