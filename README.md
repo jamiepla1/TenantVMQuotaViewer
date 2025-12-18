@@ -40,9 +40,11 @@ Install-Module -Name Az.Compute -Scope CurrentUser -Repository PSGallery -Force
 
 ```powershell
 # Run the script
+./quota.ps1 or
 ./quotafinder.ps1
 
 # Or with PowerShell Core explicitly
+pwsh -File ./quota.ps1 or
 pwsh -File ./quotafinder.ps1
 ```
 
