@@ -585,6 +585,6 @@ $(Generate-TableRows -summary $appServiceSummary)
 
 # Save HTML report
 $htmlPath = Join-Path -Path (Get-Location) -ChildPath "AllQuotaReport.html"
-$htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
+[System.IO.File]::WriteAllText($htmlPath, $htmlContent, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "HTML report generated: $htmlPath" -ForegroundColor Green
